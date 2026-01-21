@@ -1,12 +1,14 @@
 ARG BASE_IMAGE_TAG
 ARG RUBY_VERSION
 ARG RUBY_SO_SUFFIX
+ARG RUBY_PATCH_DIR=/tmp/patches
 
 ### build ###
 FROM ghcr.io/ruby/ubuntu:$BASE_IMAGE_TAG AS build
 
 ARG BASE_IMAGE_TAG
 ARG RUBY_VERSION
+ARG RUBY_PATCH_DIR
 
 ENV LANG=C.UTF-8 \
     DEBIAN_FRONTEND=noninteractive
@@ -21,6 +23,7 @@ RUN set -ex && \
             gcc \
             git \
             g++ \
+            patch \
             libffi-dev \
             libgdbm-dev \
             libgmp-dev \
@@ -42,10 +45,11 @@ RUN wget https://sh.rustup.rs -O /tmp/rustup.sh && \
     rm -f /tmp/rustup.sh
 
 COPY tmp/ruby /usr/src/ruby
+COPY patches /tmp/patches
 COPY install_ruby.sh /tmp/
 
 RUN set -ex && \
-    RUBY_VERSION=3.2.3 PREFIX=/root /tmp/install_ruby.sh
+    RUBY_VERSION=3.2.3 PREFIX=/root RUBY_PATCH_DIR= /tmp/install_ruby.sh
 RUN apt purge -y --auto-remove ruby
 COPY tmp/ruby /usr/src/ruby
 
@@ -61,7 +65,7 @@ RUN set -ex && \
       echo 'update: --no-document'; \
     } >> /usr/local/etc/gemrc && \
     \
-    PATH=/root/bin:$PATH /tmp/install_ruby.sh
+    PATH=/root/bin:$PATH RUBY_PATCH_DIR=$RUBY_PATCH_DIR /tmp/install_ruby.sh
 
 ### ruby ###
 FROM ghcr.io/ruby/ubuntu:$BASE_IMAGE_TAG AS ruby
