@@ -35,7 +35,8 @@ jobs:
         arch: [amd64, arm64]
 
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-
+    environment:
+      name: approval_required
     env:
       tag_suffix: "-${{ matrix.arch }}-${{ github.run_id }}"
       push_tags: ${{ github.event.inputs.ruby_version }}-${{ github.event.inputs.ubuntu_version }}-${{ matrix.arch }}-${{ github.run_id }}
