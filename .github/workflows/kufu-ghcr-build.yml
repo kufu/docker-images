@@ -1,0 +1,108 @@
+name: Build and Push to Kufu GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruby_version:
+        required: true
+        default: master
+        description: 'Ruby version ("master" or version number like "3.3.0")'
+        type: string
+      ubuntu_version:
+        required: false
+        default: noble
+        description: "Ubuntu version"
+        type: choice
+        options:
+          - noble
+          - jammy
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  ruby_version: ${{ github.event.inputs.ruby_version }}
+  ubuntu_version: ${{ github.event.inputs.ubuntu_version }}
+  registry_name: ghcr.io/kufu/rubylang
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+
+    env:
+      tag_suffix: "-${{ matrix.arch }}-${{ github.run_id }}"
+      push_tags: ${{ github.event.inputs.ruby_version }}-${{ github.event.inputs.ubuntu_version }}-${{ matrix.arch }}-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build docker image
+        run: |-
+          rake docker:build ruby_version=${{ env.ruby_version }} \
+                            ubuntu_version=${{ env.ubuntu_version }} \
+                            arch=linux/${{ matrix.arch }} \
+                            tag_suffix=${{ env.tag_suffix }}
+
+      - name: List images
+        run: docker images
+
+      - name: Push docker image to ghcr.io/kufu/rubylang
+        if: "${{ env.push_tags }}"
+        run: |-
+          push_tags="${{ env.push_tags }}"
+          for tag in $push_tags; do
+            docker push ${{ env.registry_name }}/ruby:$tag
+          done
+
+  deploy_multiarch:
+    strategy:
+      fail-fast: false
+
+    runs-on: ubuntu-latest
+
+    needs: build
+
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Make sure the sha of "master-{sha}" tags agrees with the RUBY_REVISION in the image
+      - name: Extract ruby_sha
+        run: echo "ruby_sha=$(docker run "$docker_image" ruby -e 'puts RUBY_REVISION')" >> "$GITHUB_ENV"
+        env:
+          docker_image: ${{ env.registry_name }}/ruby:${{ env.ruby_version }}-${{ env.ubuntu_version }}-amd64-${{ github.run_id }}
+        if: ${{ github.event.inputs.ruby_version == 'master' }}
+
+      - name: Create manifest for ${{ env.registry_name }}
+        run: |-
+          rake docker:manifest:create \
+               registry_name="${{ env.registry_name }}" \
+               ruby_version="${{ env.ruby_version }}" \
+               ubuntu_version="${{ env.ubuntu_version }}" \
+               architectures="amd64 arm64" \
+               manifest_suffix=${{ github.run_id }}
+
+      - name: Push manifest to ${{ env.registry_name }}
+        run: |-
+          rake docker:manifest:push \
+               registry_name="${{ env.registry_name }}" \
+               ruby_version="${{ env.ruby_version }}" \
+               ubuntu_version="${{ env.ubuntu_version }}"
