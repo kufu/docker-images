@@ -54,6 +54,7 @@ jobs:
           rake docker:build ruby_version=${{ env.ruby_version }} \
                             ubuntu_version=${{ env.ubuntu_version }} \
                             arch=linux/${{ matrix.arch }} \
+                            image_version_suffix="" \
                             tag_suffix=${{ env.tag_suffix }}
 
       - name: List images
@@ -98,11 +99,13 @@ jobs:
                ruby_version="${{ env.ruby_version }}" \
                ubuntu_version="${{ env.ubuntu_version }}" \
                architectures="amd64 arm64" \
-               manifest_suffix=${{ github.run_id }}
+               manifest_suffix=${{ github.run_id }} \
+               image_version_suffix=""
 
       - name: Push manifest to ${{ env.registry_name }}
         run: |-
           rake docker:manifest:push \
                registry_name="${{ env.registry_name }}" \
                ruby_version="${{ env.ruby_version }}" \
-               ubuntu_version="${{ env.ubuntu_version }}"
+               ubuntu_version="${{ env.ubuntu_version }}" \
+               image_version_suffix=""
