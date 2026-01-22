@@ -87,6 +87,11 @@ You can specify the specific revision in the master branch like:
 rake docker:build ruby_version=master:ce798d08de
 ```
 
+## Applying custom Ruby patches
+
+- Drop one or more `*.patch` files under `patches/` (they are applied with `patch -p1` in filename order before `./configure` runs).
+- By default the build stage uses that directory via the `RUBY_PATCH_DIR` build arg. To disable, pass `--build-arg RUBY_PATCH_DIR=` (empty). To use another location, point the arg at your directory.
+
 ## Build and push for the specific ruby and ubuntu versions
 
 Trigger CircleCI workflow with `ruby_version` and `ubuntu_version` pipeline parameters.

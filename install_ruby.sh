@@ -6,6 +6,7 @@ RUBY_VERSION=${RUBY_VERSION-2.6.0}
 RUBY_MAJOR=$(echo $RUBY_VERSION | sed -E 's/\.[0-9]+(-.*)?$//g')
 RUBYGEMS_VERSION=${RUBYGEMS_VERSION-3.2.3}
 PREFIX=${PREFIX-/usr/local}
+RUBY_PATCH_DIR=${RUBY_PATCH_DIR-}
 
 . "$HOME/.cargo/env"
 
@@ -115,6 +116,14 @@ fi
     export debugflags=$debugflags
   else
     unset debugflags
+  fi
+
+  if [ -n "$RUBY_PATCH_DIR" ] && [ -d "$RUBY_PATCH_DIR" ]; then
+    for patch_file in "$RUBY_PATCH_DIR"/*.patch; do
+      [ -e "$patch_file" ] || continue
+      echo "Applying patch: $(basename "$patch_file")"
+      patch -d /usr/src/ruby -p1 < "$patch_file"
+    done
   fi
 
   /usr/src/ruby/configure "${configure_args[@]}" || {

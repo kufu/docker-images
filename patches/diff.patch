@@ -1,0 +1,287 @@
+diff --git a/gc.c b/gc.c
+index 68304d26c50e0d..ff99c52c8fa8fd 100644
+--- a/gc.c
++++ b/gc.c
+@@ -1246,6 +1246,15 @@ rb_gc_obj_free_vm_weak_references(VALUE obj)
+         break;
+       case T_IMEMO:
+         switch (imemo_type(obj)) {
++          case imemo_callcache: {
++            const struct rb_callcache *cc = (const struct rb_callcache *)obj;
++
++            if (vm_cc_refinement_p(cc)) {
++                rb_vm_delete_cc_refinement(cc);
++            }
++
++            break;
++          }
+           case imemo_callinfo:
+             rb_vm_ci_free((const struct rb_callinfo *)obj);
+             break;
+@@ -3436,6 +3445,64 @@ vm_weak_table_frozen_strings_foreach(st_data_t key, st_data_t value, st_data_t d
+ 
+ struct st_table *rb_generic_ivtbl_get(void);
+ 
++struct global_vm_cc_refinement_foreach_data {
++    struct global_vm_table_foreach_data *iter_data;
++    st_table *new_tbl;
++};
++
++static int
++vm_weak_table_cc_refinement_foreach_i(st_data_t key, st_data_t value, st_data_t data)
++{
++    struct global_vm_cc_refinement_foreach_data *cc_refinement_foreach_data = (struct global_vm_cc_refinement_foreach_data *)data;
++    struct global_vm_table_foreach_data *iter_data = cc_refinement_foreach_data->iter_data;
++    struct st_table *new_tbl = cc_refinement_foreach_data->new_tbl;
++
++    int ret = iter_data->callback((VALUE)key, iter_data->data);
++
++    const struct rb_callcache *cc = (struct rb_callcache *)key;
++    switch (ret) {
++        case ST_CONTINUE:
++            break;
++        case ST_DELETE:
++            return ret;
++        case ST_REPLACE: {
++            VALUE new_key = (VALUE)key;
++            iter_data->update_callback(&new_key, iter_data->data);
++            cc = (struct rb_callcache *)new_key;
++            break;
++        }
++        default:
++          rb_bug("vm_weak_table_cc_refinement_foreach_i: return value %d not supported", ret);
++    }
++
++    DURING_GC_COULD_MALLOC_REGION_START();
++    {
++        rb_vm_insert_cc_refinement(new_tbl, cc);
++    }
++    DURING_GC_COULD_MALLOC_REGION_END();
++
++    return ret;
++}
++
++static st_table *
++vm_weak_table_cc_refinement_rebuild(st_table *cc_refinement_table, struct global_vm_table_foreach_data *iter_data)
++{
++    st_table *new_tbl = NULL;
++    DURING_GC_COULD_MALLOC_REGION_START();
++    {
++        new_tbl = st_init_numtable_with_size(st_table_size(cc_refinement_table));
++    }
++    DURING_GC_COULD_MALLOC_REGION_END();
++
++    struct global_vm_cc_refinement_foreach_data cc_refinement_foreach_data = {
++        .iter_data = iter_data,
++        .new_tbl = new_tbl,
++    };
++
++    st_foreach(cc_refinement_table, vm_weak_table_cc_refinement_foreach_i, (st_data_t)&cc_refinement_foreach_data);
++    return new_tbl;
++}
++
+ void
+ rb_gc_vm_weak_table_foreach(vm_table_foreach_callback_func callback,
+                             vm_table_update_callback_func update_callback,
+@@ -3498,6 +3565,17 @@ rb_gc_vm_weak_table_foreach(vm_table_foreach_callback_func callback,
+         );
+         break;
+       }
++      case RB_GC_VM_CC_REFINEMENT_TABLE: {
++        st_table_size(vm->cc_refinement_table);
++        if (vm->cc_refinement_table && st_table_size(vm->cc_refinement_table) > 0) {
++            st_table *old_tbl = vm->cc_refinement_table;
++            st_table *new_tbl = vm_weak_table_cc_refinement_rebuild(vm->cc_refinement_table, &foreach_data);
++
++            vm->cc_refinement_table = new_tbl;
++            st_free_table(old_tbl);
++        }
++        break;
++      }
+       default:
+         rb_bug("rb_gc_vm_weak_table_foreach: unknown table %d", table);
+     }
+diff --git a/gc/gc.h b/gc/gc.h
+index 5b380df1f45cc8..a096bb184a0d74 100644
+--- a/gc/gc.h
++++ b/gc/gc.h
+@@ -30,6 +30,7 @@ enum rb_gc_vm_weak_tables {
+     RB_GC_VM_GLOBAL_SYMBOLS_TABLE,
+     RB_GC_VM_GENERIC_IV_TABLE,
+     RB_GC_VM_FROZEN_STRINGS_TABLE,
++    RB_GC_VM_CC_REFINEMENT_TABLE,
+     RB_GC_VM_WEAK_TABLE_COUNT
+ };
+ #endif
+diff --git a/method.h b/method.h
+index 030c3cc3d18be9..5c5d19cabe6223 100644
+--- a/method.h
++++ b/method.h
+@@ -250,6 +250,9 @@ void rb_scope_visibility_set(rb_method_visibility_t);
+ 
+ VALUE rb_unnamed_parameters(int arity);
+ 
++void rb_vm_insert_cc_refinement(st_table *cc_refinement_table, const struct rb_callcache *cc);
++void rb_vm_delete_cc_refinement(const struct rb_callcache *cc);
++
+ void rb_clear_method_cache(VALUE klass_or_module, ID mid);
+ void rb_clear_all_refinement_method_cache(void);
+ 
+diff --git a/vm.c b/vm.c
+index 9a0008ea070ccd..7aa9739fba67c6 100644
+--- a/vm.c
++++ b/vm.c
+@@ -3143,6 +3143,10 @@ ruby_vm_destruct(rb_vm_t *vm)
+             st_free_table(vm->frozen_strings);
+             vm->frozen_strings = 0;
+         }
++        if (vm->cc_refinement_table) {
++            st_free_table(vm->cc_refinement_table);
++            vm->cc_refinement_table = NULL;
++        }
+         RB_ALTSTACK_FREE(vm->main_altstack);
+ 
+         struct global_object_list *next;
+@@ -3245,6 +3249,7 @@ vm_memsize(const void *ptr)
+         vm_memsize_builtin_function_table(vm->builtin_function_table) +
+         rb_id_table_memsize(vm->negative_cme_table) +
+         rb_st_memsize(vm->overloaded_cme_table) +
++        rb_st_memsize(vm->cc_refinement_table) +
+         vm_memsize_constant_cache() +
+         GET_SHAPE_TREE()->cache_size * sizeof(redblack_node_t)
+     );
+@@ -4447,6 +4452,7 @@ Init_vm_objects(void)
+     vm->loading_table = st_init_strtable();
+     vm->ci_table = st_init_table(&vm_ci_hashtype);
+     vm->frozen_strings = st_init_table_with_size(&rb_fstring_hash_type, 10000);
++    vm->cc_refinement_table = st_init_numtable();
+ }
+ 
+ // Stub for builtin function when not building YJIT units
+diff --git a/vm_callinfo.h b/vm_callinfo.h
+index d85261aaf900cd..5e0fcc5465cf8a 100644
+--- a/vm_callinfo.h
++++ b/vm_callinfo.h
+@@ -345,6 +345,7 @@ vm_cc_new(VALUE klass,
+         break;
+       case cc_type_refinement:
+         *(VALUE *)&cc->flags |= VM_CALLCACHE_REFINEMENT;
++        rb_vm_insert_cc_refinement(NULL, cc);
+         break;
+     }
+ 
+diff --git a/vm_core.h b/vm_core.h
+index 961cc3967c3a6d..ccca31a768c34c 100644
+--- a/vm_core.h
++++ b/vm_core.h
+@@ -799,6 +799,7 @@ typedef struct rb_vm_struct {
+     struct rb_id_table *negative_cme_table;
+     st_table *overloaded_cme_table; // cme -> overloaded_cme
+     st_table *unused_block_warning_table;
++    st_table *cc_refinement_table;
+ 
+     // This id table contains a mapping from ID to ICs. It does this with ID
+     // keys and nested st_tables as values. The nested tables have ICs as keys
+diff --git a/vm_method.c b/vm_method.c
+index e4f71648acb3aa..177723fd423d28 100644
+--- a/vm_method.c
++++ b/vm_method.c
+@@ -310,27 +310,29 @@ rb_clear_method_cache(VALUE klass_or_module, ID mid)
+ }
+ 
+ static int
+-invalidate_all_refinement_cc(void *vstart, void *vend, size_t stride, void *data)
+-{
+-    VALUE v = (VALUE)vstart;
+-    for (; v != (VALUE)vend; v += stride) {
+-        void *ptr = rb_asan_poisoned_object_p(v);
+-        rb_asan_unpoison_object(v, false);
+-
+-        if (RBASIC(v)->flags) { // liveness check
+-            if (imemo_type_p(v, imemo_callcache)) {
+-                const struct rb_callcache *cc = (const struct rb_callcache *)v;
+-                if (vm_cc_refinement_p(cc) && cc->klass) {
+-                    vm_cc_invalidate(cc);
+-                }
+-            }
+-        }
++invalidate_cc_refinement(st_data_t key, st_data_t value, st_data_t data)
++{
++    VALUE v = (VALUE)key;
++    void *ptr = rb_asan_poisoned_object_p(v);
++    rb_asan_unpoison_object(v, false);
++
++    if (rb_gc_pointer_to_heap_p(v) &&
++        !rb_objspace_garbage_object_p(v) &&
++        RBASIC(v)->flags) { // liveness check
++        const struct rb_callcache *cc = (const struct rb_callcache *)v;
+ 
+-        if (ptr) {
+-            rb_asan_poison_object(v);
++        VM_ASSERT(vm_cc_refinement_p(cc));
++
++        if (cc->klass) {
++            vm_cc_invalidate(cc);
+         }
+     }
+-    return 0; // continue to iteration
++
++    if (ptr) {
++        rb_asan_poison_object(v);
++    }
++
++    return ST_CONTINUE;
+ }
+ 
+ static st_index_t
+@@ -442,10 +444,49 @@ rb_vm_ci_free(const struct rb_callinfo *ci)
+     st_delete(vm->ci_table, &key, NULL);
+ }
+ 
++void
++rb_vm_insert_cc_refinement(st_table *cc_refinement_table, const struct rb_callcache *cc)
++{
++    st_data_t key = (st_data_t)cc;
++
++    if (cc_refinement_table) {
++        st_insert(cc_refinement_table, key, 1);
++    } else {
++        rb_vm_t *vm = GET_VM();
++        RB_VM_LOCK_ENTER();
++        {
++            st_insert(vm->cc_refinement_table, key, 1);
++        }
++        RB_VM_LOCK_LEAVE();
++    }
++}
++
++void rb_st_compact_table(st_table *tab);
++
++void
++rb_vm_delete_cc_refinement(const struct rb_callcache *cc)
++{
++    ASSERT_vm_locking();
++
++    rb_vm_t *vm = GET_VM();
++    st_data_t key = (st_data_t)cc;
++
++    st_delete(vm->cc_refinement_table, &key, NULL);
++}
++
+ void
+ rb_clear_all_refinement_method_cache(void)
+ {
+-    rb_objspace_each_objects(invalidate_all_refinement_cc, NULL);
++    rb_vm_t *vm = GET_VM();
++
++    RB_VM_LOCK_ENTER();
++    {
++        st_foreach(vm->cc_refinement_table, invalidate_cc_refinement, (st_data_t)NULL);
++        st_clear(vm->cc_refinement_table);
++        rb_st_compact_table(vm->cc_refinement_table);
++    }
++    RB_VM_LOCK_LEAVE();
++
+     rb_yjit_invalidate_all_method_lookup_assumptions();
+ }
+ 
